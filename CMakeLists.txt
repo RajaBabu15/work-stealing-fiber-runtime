@@ -10,3 +10,16 @@ endif()
 
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -DNDEBUG")
 set(CMAKE_CXX_FLAGS_DEBUG   "-O0 -g -fsanitize=address,undefined")
+
+set(ASM_SOURCE src/context_switch_arm64.S)
+message(STATUS "Target: ARM64 (Apple Silicon)")
+
+add_executable(fiber_runtime
+  ${ASM_SOURCE}
+  src/fiber.cpp
+  src/scheduler.cpp
+  src/main.cpp
+)
+target_include_directories(fiber_runtime PRIVATE src)
+find_package(Threads REQUIRED)
+target_link_libraries(fiber_runtime PRIVATE Threads::Threads)
