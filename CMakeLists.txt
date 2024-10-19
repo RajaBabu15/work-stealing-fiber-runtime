@@ -11,8 +11,15 @@ endif()
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -DNDEBUG")
 set(CMAKE_CXX_FLAGS_DEBUG   "-O0 -g -fsanitize=address,undefined")
 
-set(ASM_SOURCE src/context_switch_arm64.S)
-message(STATUS "Target: ARM64 (Apple Silicon)")
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64|ARM64")
+  set(ASM_SOURCE src/context_switch_arm64.S)
+  message(STATUS "Target: ARM64 (Apple Silicon)")
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+  set(ASM_SOURCE src/context_switch_x86_64.S)
+  message(STATUS "Target: x86_64")
+else()
+  message(FATAL_ERROR "Unsupported architecture: ${CMAKE_SYSTEM_PROCESSOR}")
+endif()
 
 add_executable(fiber_runtime
   ${ASM_SOURCE}

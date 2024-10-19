@@ -65,6 +65,12 @@ void init_fiber_stack(Fiber* f, std::function<void()> fn) {
     sp[1] = reinterpret_cast<uint64_t>(&fiber_trampoline);  // x30 / lr
     f->saved_sp = sp;
 
+#elif defined(__x86_64__)
+    uint64_t* sp = reinterpret_cast<uint64_t*>(stack_top - 64);
+    std::memset(sp, 0, 64);
+    sp[6] = reinterpret_cast<uint64_t>(&fiber_trampoline);
+    f->saved_sp = sp;
+
 #else
     #error "Unsupported architecture"
 #endif
