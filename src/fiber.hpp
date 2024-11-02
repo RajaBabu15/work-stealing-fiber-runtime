@@ -14,6 +14,14 @@ extern thread_local struct Fiber*  tl_current_fiber;
 static constexpr size_t kFiberStackSize = 512 * 1024;
 static constexpr size_t kGuardPageSize  = 4096;
 
+#if defined(__aarch64__) || defined(__arm64__)
+static constexpr size_t kCtxFrameBytes = 0xb0;
+#elif defined(__x86_64__)
+static constexpr size_t kCtxFrameBytes = 216;  // 160 xmm + 48 gpr + 8 ret
+#else
+static constexpr size_t kCtxFrameBytes = 0;
+#endif
+
 struct Fiber {
     void*    saved_sp{nullptr};
     void*    stack_base{nullptr};
@@ -27,3 +35,5 @@ Fiber* alloc_fiber(size_t stack_size = kFiberStackSize);
 void   free_fiber(Fiber* f);
 void   init_fiber_stack(Fiber* f, std::function<void()> fn);
 void   fiber_yield();
+
+void record_switch_ns(uint64_t ns);
