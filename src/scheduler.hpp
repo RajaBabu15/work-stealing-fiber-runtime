@@ -10,7 +10,7 @@
 
 struct WorkerContext {
     int   id{0};
-    void* scheduler_sp{nullptr};  // saved on first fiber_switch; restored by fiber_yield
+    void* scheduler_sp{nullptr};
 
     WorkStealingDeque<Fiber> deque;
 
@@ -18,8 +18,11 @@ struct WorkerContext {
     std::atomic<uint64_t> steal_count{0};
     std::atomic<uint64_t> yield_ns_sum{0};
     std::atomic<uint64_t> yield_sample_count{0};
+    std::atomic<uint64_t> switch_ns_sum{0};
+    std::atomic<uint64_t> switch_sample_count{0};
 
-    WorkerContext() = default;
+    explicit WorkerContext(size_t deque_capacity) : deque(deque_capacity) {}
+
     WorkerContext(const WorkerContext&) = delete;
     WorkerContext& operator=(const WorkerContext&) = delete;
 };
@@ -33,18 +36,20 @@ struct SchedulerConfig {
 
 class Scheduler {
 public:
-    std::vector<std::unique_ptr<WorkerContext>> workers_;
-
     explicit Scheduler(SchedulerConfig cfg);
     ~Scheduler() = default;
 
     void run();
+    void enqueue_initial(Fiber* f);
+    size_t queue_size(int worker_id) const;
 
     struct Stats {
         uint64_t total_ctx_switches{0};
         uint64_t total_steals{0};
         uint64_t total_yield_ns{0};
         uint64_t total_yield_samples{0};
+        uint64_t total_switch_ns{0};
+        uint64_t total_switch_samples{0};
         std::vector<uint64_t> per_worker_ctx_switches;
         std::vector<uint64_t> per_worker_steals;
         std::vector<size_t>   final_queue_sizes;
@@ -53,6 +58,7 @@ public:
 
 private:
     SchedulerConfig cfg_;
+    std::vector<std::unique_ptr<WorkerContext>> workers_;
     std::vector<std::thread> threads_;
     std::atomic<uint64_t>    fibers_done_{0};
     std::atomic<bool>        shutdown_{false};

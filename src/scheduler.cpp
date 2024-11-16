@@ -1,7 +1,6 @@
 #include "scheduler.hpp"
 #include "fiber.hpp"
 
-#include <sys/resource.h>
 #include <chrono>
 #include <cstdio>
 #include <random>
@@ -13,20 +12,40 @@ static inline uint64_t now_ns() {
         duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count());
 }
 
+static size_t deque_capacity_for(int num_fibers) {
+    size_t n = static_cast<size_t>(num_fibers < 4096 ? 4096 : num_fibers);
+    --n;
+    n |= n >> 1;
+    n |= n >> 2;
+    n |= n >> 4;
+    n |= n >> 8;
+    n |= n >> 16;
+    if constexpr (sizeof(size_t) > 4)
+        n |= n >> 32;
+    return n + 1;
+}
+
 Scheduler::Scheduler(SchedulerConfig cfg) : cfg_(cfg) {
+    const size_t cap = deque_capacity_for(cfg_.num_fibers);
     workers_.reserve(cfg_.num_workers);
     for (int i = 0; i < cfg_.num_workers; i++) {
-        workers_.push_back(std::make_unique<WorkerContext>());
+        workers_.push_back(std::make_unique<WorkerContext>(cap));
         workers_.back()->id = i;
     }
+}
+
+void Scheduler::enqueue_initial(Fiber* f) {
+    workers_[0]->deque.push(f);
+}
+
+size_t Scheduler::queue_size(int worker_id) const {
+    return workers_[static_cast<size_t>(worker_id)]->deque.size();
 }
 
 void Scheduler::worker_entry(int worker_id) {
     WorkerContext& ctx = *workers_[worker_id];
     tl_worker        = &ctx;
     tl_current_fiber = nullptr;
-
-    thread_local std::mt19937_64 rng{std::random_device{}() ^ (uint64_t)worker_id};
 
     while (!shutdown_.load(std::memory_order_relaxed)) {
         Fiber* f = ctx.deque.pop();
@@ -47,6 +66,9 @@ void Scheduler::worker_entry(int worker_id) {
 
         uint64_t t0 = now_ns();
         fiber_switch(&ctx.scheduler_sp, f->saved_sp);
+        uint64_t sw_ns = now_ns() - t0;
+        record_switch_ns(sw_ns);
+
         uint64_t t1 = now_ns();
 
         ctx.ctx_switch_count.fetch_add(2, std::memory_order_relaxed);
@@ -144,6 +166,8 @@ Scheduler::Stats Scheduler::collect_stats() const {
         s.total_steals              += st;
         s.total_yield_ns            += workers_[i]->yield_ns_sum.load(std::memory_order_relaxed);
         s.total_yield_samples       += workers_[i]->yield_sample_count.load(std::memory_order_relaxed);
+        s.total_switch_ns           += workers_[i]->switch_ns_sum.load(std::memory_order_relaxed);
+        s.total_switch_samples      += workers_[i]->switch_sample_count.load(std::memory_order_relaxed);
     }
     return s;
 }

@@ -10,14 +10,20 @@
 
 #if defined(__aarch64__) || defined(__arm64__)
 static constexpr const char* kArch    = "arm64";
-static constexpr const char* kAsmDesc = "6xstp + sp-swap + 6xldp + ret (16 insns)";
+static constexpr const char* kAsmDesc = "0xb0 frame: d8-d15 + x19-x30 + sp-swap + ret";
 #elif defined(__x86_64__)
 static constexpr const char* kArch    = "x86_64";
-static constexpr const char* kAsmDesc = "6xpush + rsp-swap + 6xpop + ret (15 insns)";
+static constexpr const char* kAsmDesc = "xmm6-15 + rbx/rbp/r12-r15 + rsp-swap + ret";
 #else
 static constexpr const char* kArch    = "unknown";
 static constexpr const char* kAsmDesc = "unknown";
 #endif
+
+static double one_way_switch_ns(const Scheduler::Stats& stats) {
+    return stats.total_switch_samples
+         ? (double)stats.total_switch_ns / stats.total_switch_samples
+         : 0.0;
+}
 
 static void print_usage(const char* prog) {
     std::fprintf(stderr,
@@ -61,27 +67,27 @@ static void run_latency_probe() {
         init_fiber_stack(f, [ro]() {
             for (int r = 0; r < ro; ++r) fiber_yield();
         });
-        sched.workers_[0]->deque.push(f);
+        sched.enqueue_initial(f);
     }
     sched.run();
 
     auto t1 = std::chrono::steady_clock::now();
     getrusage(RUSAGE_SELF, &ru1);
 
-    double wall      = std::chrono::duration<double>(t1 - t0).count();
-    auto   stats     = sched.collect_stats();
-    double lat_ns    = stats.total_yield_samples
-                     ? (double)stats.total_yield_ns / stats.total_yield_samples / 2.0
-                     : 0.0;
+    double wall   = std::chrono::duration<double>(t1 - t0).count();
+    auto   stats  = sched.collect_stats();
+    double sw_lat = one_way_switch_ns(stats);
 
     std::printf("\n");
     sep('=', 60);
     std::printf("  ctx switches   : %llu\n",
                 (unsigned long long)stats.total_ctx_switches);
-    std::printf("  latency (1-way): %.1f ns\n", lat_ns);
+    std::printf("  switch latency (1-way): %.1f ns\n", sw_lat);
     std::printf("  throughput     : %.2f M yields/sec\n",
                 (double)cfg.num_fibers * cfg.rounds / wall / 1e6);
-    std::printf("  OS vol. csw    : %ld\n", ru1.ru_nvcsw - ru0.ru_nvcsw);
+    std::printf("  OS vol. csw    : %ld  (voluntary only)\n",
+                ru1.ru_nvcsw - ru0.ru_nvcsw);
+    std::printf("  OS invol. csw  : %ld\n", ru1.ru_nivcsw - ru0.ru_nivcsw);
     sep('=', 60);
     std::printf("\n");
 }
@@ -141,11 +147,11 @@ int main(int argc, char** argv) {
             }
             (void)acc;
         });
-        sched.workers_[0]->deque.push(f);
+        sched.enqueue_initial(f);
     }
 
     std::printf("\n  worker 0 queue: %zu  (workers 1..%d will steal)\n\n",
-                sched.workers_[0]->deque.size(), cfg.num_workers - 1);
+                sched.queue_size(0), cfg.num_workers - 1);
     std::fflush(stdout);
 
     sched.run();
@@ -153,11 +159,11 @@ int main(int argc, char** argv) {
     auto wall_end = std::chrono::steady_clock::now();
     getrusage(RUSAGE_SELF, &ru1);
 
-    double wall  = std::chrono::duration<double>(wall_end - wall_start).count();
-    auto   stats = sched.collect_stats();
-    double lat   = stats.total_yield_samples
-                 ? (double)stats.total_yield_ns / stats.total_yield_samples / 2.0
-                 : 0.0;
+    double wall      = std::chrono::duration<double>(wall_end - wall_start).count();
+    auto   stats     = sched.collect_stats();
+    double yield_rt  = stats.total_yield_samples
+                     ? (double)stats.total_yield_ns / stats.total_yield_samples
+                     : 0.0;
 
     std::printf("\n");
     sep('=', 60);
@@ -166,12 +172,15 @@ int main(int argc, char** argv) {
     std::printf("  wall time      : %.3f s\n", wall);
     std::printf("  ctx switches   : %llu (user-space)\n",
                 (unsigned long long)stats.total_ctx_switches);
-    std::printf("  latency (1-way): %.1f ns\n", lat);
+    std::printf("  round-trip yield (incl. work): %.1f ns\n", yield_rt);
+    std::printf("  switch latency (1-way)       : %.1f ns\n",
+                one_way_switch_ns(stats));
     std::printf("  throughput     : %.2f M yields/sec\n",
                 (double)total_yields / wall / 1e6);
     std::printf("  steals         : %llu\n",
                 (unsigned long long)stats.total_steals);
-    std::printf("  OS vol. csw    : %ld\n",  ru1.ru_nvcsw  - ru0.ru_nvcsw);
+    std::printf("  OS vol. csw    : %ld  (voluntary only)\n",
+                ru1.ru_nvcsw  - ru0.ru_nvcsw);
     std::printf("  OS invol. csw  : %ld\n",  ru1.ru_nivcsw - ru0.ru_nivcsw);
     sep('-', 60);
     std::printf("  %-8s  %-12s  %-10s  %s\n",
