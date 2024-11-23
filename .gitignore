@@ -1,5 +1,7 @@
 # Build directories
 build/
+build-asan/
+build-tsan/
 cmake-build-*/
 
 # CMake artifacts
