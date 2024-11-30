@@ -3,7 +3,7 @@
 //   x1 = next->saved_sp      (in:  value used directly as new sp)
 //
 // Fixed 0xb0-byte frame (Boost.Context AAPCS64 layout):
-//   d8-d15 @ 0x00, x19-x30 @ 0x40, PC @ 0xa0
+//   d8-d15 @ 0x00, x19-x30 @ 0x40 (x30/LR used as return address via ret)
 
 .text
 .p2align 4
@@ -22,7 +22,6 @@ _fiber_switch:
     stp  x25, x26, [sp, #0x70]
     stp  x27, x28, [sp, #0x80]
     stp  x29, x30, [sp, #0x90]
-    str  x30, [sp, #0xa0]
 
     mov  x9, sp
     str  x9, [x0]

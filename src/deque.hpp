@@ -12,6 +12,7 @@
 #include <cstring>
 #include <new>
 #include <stdexcept>
+#include <vector>
 
 template <typename T>
 class WorkStealingDeque {
@@ -41,7 +42,9 @@ class WorkStealingDeque {
     alignas(64) std::atomic<size_t>   capacity_{0};
     alignas(64) std::atomic<uint64_t> version_{0};
 
-    Buffer* retired_{nullptr};
+    // Buffers replaced by grow() are kept until destructor. Stealers may still
+    // be reading a retired buffer's slots[] after buf_ is swapped.
+    std::vector<Buffer*> retired_buffers_;
 
     static Buffer* alloc_buffer(size_t cap) {
         auto* b   = new Buffer;
@@ -52,15 +55,14 @@ class WorkStealingDeque {
         return b;
     }
 
-    void free_buffer(Buffer* b) {
+    static void free_buffer(Buffer* b) {
         if (!b) return;
         delete[] b->slots;
         delete b;
     }
 
     void retire_buffer(Buffer* b) {
-        free_buffer(retired_);
-        retired_ = b;
+        if (b) retired_buffers_.push_back(b);
     }
 
     void grow_locked(size_t t, size_t b, Buffer* old, size_t old_cap) {
@@ -71,8 +73,8 @@ class WorkStealingDeque {
             fresh->slots[i & (new_cap - 1)].store(item, std::memory_order_relaxed);
         }
         version_.fetch_add(1, std::memory_order_release);
-        buf_.store(fresh, std::memory_order_release);
         capacity_.store(new_cap, std::memory_order_release);
+        buf_.store(fresh, std::memory_order_release);
         version_.fetch_add(1, std::memory_order_release);
         retire_buffer(old);
     }
@@ -87,7 +89,8 @@ public:
 
     ~WorkStealingDeque() {
         free_buffer(buf_.load(std::memory_order_relaxed));
-        free_buffer(retired_);
+        for (Buffer* b : retired_buffers_)
+            free_buffer(b);
     }
 
     WorkStealingDeque(const WorkStealingDeque&)            = delete;
@@ -97,7 +100,7 @@ public:
         for (;;) {
             uint64_t ver0 = version_.load(std::memory_order_acquire);
             Buffer*  buf  = buf_.load(std::memory_order_acquire);
-            size_t   cap  = capacity_.load(std::memory_order_acquire);
+            size_t   cap  = buf->capacity;
             size_t   b    = bottom_.load(std::memory_order_relaxed);
             size_t   t    = top_.load(std::memory_order_relaxed);
 
@@ -119,60 +122,64 @@ public:
         for (;;) {
             uint64_t ver0 = version_.load(std::memory_order_acquire);
             Buffer*  buf  = buf_.load(std::memory_order_acquire);
-            size_t   cap  = capacity_.load(std::memory_order_acquire);
+            size_t   cap  = buf->capacity;
 
-            size_t b = bottom_.load(std::memory_order_relaxed);
-            if (b == top_.load(std::memory_order_relaxed))
+            size_t b0 = bottom_.load(std::memory_order_relaxed);
+            if (b0 == top_.load(std::memory_order_relaxed))
                 return nullptr;
 
-            b--;
+            size_t b = b0 - 1;
             bottom_.store(b, std::memory_order_relaxed);
             std::atomic_thread_fence(std::memory_order_seq_cst);
             size_t t = top_.load(std::memory_order_relaxed);
 
-            if (t < b) {
-                T* item = buf->slots[b & (cap - 1)].load(std::memory_order_relaxed);
-                if (version_.load(std::memory_order_acquire) == ver0)
-                    return item;
-                continue;
-            }
-
             if (t > b) {
-                bottom_.store(b + 1, std::memory_order_relaxed);
+                bottom_.store(b0, std::memory_order_relaxed);
                 return nullptr;
             }
 
             T* item = buf->slots[b & (cap - 1)].load(std::memory_order_relaxed);
-        bool won = top_.compare_exchange_strong(
-            t, t + 1, std::memory_order_seq_cst, std::memory_order_relaxed);
-        bottom_.store(b + 1, std::memory_order_relaxed);
-        if (won) return item;
-        if (version_.load(std::memory_order_acquire) == ver0)
-            return nullptr;
-    }
-}
 
-T* steal() {
-    for (;;) {
-        uint64_t ver0 = version_.load(std::memory_order_acquire);
-        Buffer*  buf  = buf_.load(std::memory_order_acquire);
-        size_t   cap  = capacity_.load(std::memory_order_acquire);
+            if (t < b) {
+                if (version_.load(std::memory_order_acquire) == ver0)
+                    return item;
+                bottom_.store(b0, std::memory_order_relaxed);
+                continue;
+            }
 
-        size_t t = top_.load(std::memory_order_acquire);
-        std::atomic_thread_fence(std::memory_order_seq_cst);
-        size_t b = bottom_.load(std::memory_order_acquire);
-        if (t >= b) return nullptr;
+            // t == b: race with steal for the last element
+            if (top_.compare_exchange_strong(
+                    t, t + 1, std::memory_order_seq_cst, std::memory_order_relaxed)) {
+                bottom_.store(b0, std::memory_order_relaxed);
+                return item;
+            }
 
-        T* item = buf->slots[t & (cap - 1)].load(std::memory_order_relaxed);
-        if (!top_.compare_exchange_strong(
-                t, t + 1, std::memory_order_seq_cst, std::memory_order_relaxed)) {
+            bottom_.store(b0, std::memory_order_relaxed);
             if (version_.load(std::memory_order_acquire) == ver0)
                 return nullptr;
-            continue;
         }
-        return item;
     }
-}
+
+    T* steal() {
+        for (;;) {
+            uint64_t ver0 = version_.load(std::memory_order_acquire);
+            Buffer*  buf  = buf_.load(std::memory_order_acquire);
+            size_t   cap  = buf->capacity;
+
+            size_t t = top_.load(std::memory_order_acquire);
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+            size_t b = bottom_.load(std::memory_order_acquire);
+            if (t >= b) return nullptr;
+
+            T* item = buf->slots[t & (cap - 1)].load(std::memory_order_relaxed);
+            if (top_.compare_exchange_strong(
+                    t, t + 1, std::memory_order_seq_cst, std::memory_order_relaxed))
+                return item;
+
+            if (version_.load(std::memory_order_acquire) == ver0)
+                return nullptr;
+        }
+    }
 
     size_t size() const {
         size_t b = bottom_.load(std::memory_order_relaxed);
