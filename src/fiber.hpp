@@ -17,9 +17,9 @@ static constexpr size_t kGuardPageSize  = 4096;
 #if defined(__aarch64__) || defined(__arm64__)
 static constexpr size_t kCtxFrameBytes = 0xb0;
 #elif defined(__x86_64__)
-static constexpr size_t kCtxFrameBytes = 216;  // 160 xmm + 48 gpr + 8 ret
+static constexpr size_t kCtxFrameBytes = 208;  // 160 xmm + 48 gpr (6 pushes) + 8 ret
 #else
-static constexpr size_t kCtxFrameBytes = 0;
+#error "Unsupported architecture"
 #endif
 
 struct Fiber {

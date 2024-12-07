@@ -79,6 +79,7 @@ void init_fiber_stack(Fiber* f, std::function<void()> fn) {
     f->saved_sp = frame;
 
 #elif defined(__x86_64__)
+    static_assert(kCtxFrameBytes == 208, "must match context_switch_x86_64.S frame layout");
     char* frame = stack_top - kCtxFrameBytes;
     std::memset(frame, 0, kCtxFrameBytes);
     // ret target after 6 GPR pops (offset 160) + 160 xmm bytes
