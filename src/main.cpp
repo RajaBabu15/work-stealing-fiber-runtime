@@ -33,7 +33,9 @@ static void print_usage(const char* prog) {
         "  --yield-every  N   iterations per yield  (default: 1000)\n"
         "  --rounds       N   yields per fiber      (default: 10)\n"
         "  --stack-kb     N   stack per fiber in KB (default: 512)\n"
-        "  --latency-probe    measure raw ctx-switch latency\n",
+        "  --latency-probe    measure scheduler round-trip latency\n"
+        "  --bench-switch     isolated 1-way fiber_switch microbenchmark\n"
+        "  --switch-iters N   iterations for --bench-switch (default: 5000000)\n",
         prog);
 }
 
@@ -82,7 +84,12 @@ static void run_latency_probe() {
     sep('=', 60);
     std::printf("  ctx switches   : %llu\n",
                 (unsigned long long)stats.total_ctx_switches);
-    std::printf("  switch latency (1-way): %.1f ns\n", sw_lat);
+    // NOTE: this is a 2-switch round-trip through the scheduler, not a true
+    // one-way switch. Reported as a round-trip; see --bench-switch for the
+    // isolated one-way number (~ this / 2).
+    std::printf("  scheduler round-trip   : %.1f ns  (2 switches)\n", sw_lat);
+    std::printf("  ~per one-way switch    : %.1f ns  (round-trip/2; see --bench-switch)\n",
+                sw_lat / 2.0);
     std::printf("  throughput     : %.2f M yields/sec\n",
                 (double)cfg.num_fibers * cfg.rounds / wall / 1e6);
     std::printf("  OS vol. csw    : %ld  (voluntary only)\n",
@@ -92,11 +99,61 @@ static void run_latency_probe() {
     std::printf("\n");
 }
 
+// Isolated one-way switch microbenchmark. Two contexts (driver + one fiber)
+// ping-pong with NO work loop, NO scheduler, and NO per-switch clock reads —
+// a single clock pair brackets the whole loop, so the result is the pure
+// fiber_switch cost. Each driver iteration performs two one-way switches
+// (driver->fiber, then fiber->driver), hence the /(2*iters).
+static void run_switch_microbench(uint64_t iters) {
+    sep('=', 60);
+    std::printf("  switch microbench — isolated 1-way fiber_switch (no scheduler/work)\n");
+    std::printf("  arch: %s  asm: %s\n", kArch, kAsmDesc);
+    std::printf("  timed switches: %llu\n", (unsigned long long)(2 * iters));
+    sep('-', 60);
+    std::fflush(stdout);
+
+    WorkerContext ctx(64);          // supplies scheduler_sp; tl_worker must be set
+    tl_worker = &ctx;
+    Fiber* f  = alloc_fiber();
+    f->id     = 0;
+    init_fiber_stack(f, []() {
+        // Raw yield back to the driver, forever — the driver bounds the count.
+        for (;;) fiber_switch(&tl_current_fiber->saved_sp, tl_worker->scheduler_sp);
+    });
+    tl_current_fiber = f;
+
+    const uint64_t warmup = 100000;
+    for (uint64_t i = 0; i < warmup; ++i)
+        fiber_switch(&ctx.scheduler_sp, f->saved_sp);
+
+    auto t0 = std::chrono::steady_clock::now();
+    for (uint64_t i = 0; i < iters; ++i)
+        fiber_switch(&ctx.scheduler_sp, f->saved_sp);
+    auto t1 = std::chrono::steady_clock::now();
+
+    double total_ns   = std::chrono::duration<double, std::nano>(t1 - t0).count();
+    double one_way_ns  = total_ns / (2.0 * (double)iters);
+
+    free_fiber(f);                  // abandon mid-stack; munmap is clean
+    tl_current_fiber = nullptr;
+    tl_worker        = nullptr;
+
+    std::printf("\n");
+    sep('=', 60);
+    std::printf("  one-way switch latency : %.1f ns\n", one_way_ns);
+    std::printf("  switch throughput      : %.2f M switches/sec\n",
+                (2.0 * (double)iters) / (total_ns / 1e9) / 1e6);
+    sep('=', 60);
+    std::printf("\n");
+}
+
 int main(int argc, char** argv) {
     SchedulerConfig cfg;
     cfg.num_workers = static_cast<int>(std::thread::hardware_concurrency());
-    size_t stack_kb      = 512;
-    bool   latency_probe = false;
+    size_t   stack_kb      = 512;
+    bool     latency_probe = false;
+    bool     bench_switch  = false;
+    uint64_t switch_iters  = 5'000'000;
 
     for (int i = 1; i < argc; i++) {
         if      (!std::strcmp(argv[i], "--workers")      && i+1 < argc) cfg.num_workers = std::atoi(argv[++i]);
@@ -105,11 +162,14 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--rounds")       && i+1 < argc) cfg.rounds      = std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i], "--stack-kb")     && i+1 < argc) stack_kb        = (size_t)std::atoll(argv[++i]);
         else if (!std::strcmp(argv[i], "--latency-probe"))               latency_probe   = true;
+        else if (!std::strcmp(argv[i], "--bench-switch"))                bench_switch    = true;
+        else if (!std::strcmp(argv[i], "--switch-iters")  && i+1 < argc) switch_iters    = (uint64_t)std::atoll(argv[++i]);
         else if (!std::strcmp(argv[i], "--help"))        { print_usage(argv[0]); return 0; }
         else { std::fprintf(stderr, "unknown arg: %s\n", argv[i]); return 1; }
     }
 
     if (latency_probe) { run_latency_probe(); return 0; }
+    if (bench_switch)  { run_switch_microbench(switch_iters); return 0; }
 
     const size_t   stack_size   = stack_kb * 1024;
     const uint64_t total_yields = (uint64_t)cfg.num_fibers * cfg.rounds;
@@ -173,8 +233,7 @@ int main(int argc, char** argv) {
     std::printf("  ctx switches   : %llu (user-space)\n",
                 (unsigned long long)stats.total_ctx_switches);
     std::printf("  round-trip yield (incl. work): %.1f ns\n", yield_rt);
-    std::printf("  switch latency (1-way)       : %.1f ns\n",
-                one_way_switch_ns(stats));
+    std::printf("  pure 1-way switch latency    : run --bench-switch (isolated)\n");
     std::printf("  throughput     : %.2f M yields/sec\n",
                 (double)total_yields / wall / 1e6);
     std::printf("  steals         : %llu\n",
