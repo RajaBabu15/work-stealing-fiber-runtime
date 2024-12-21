@@ -66,13 +66,11 @@ void Scheduler::worker_entry(int worker_id) {
 
         uint64_t t0 = now_ns();
         fiber_switch(&ctx.scheduler_sp, f->saved_sp);
-        uint64_t sw_ns = now_ns() - t0;
-        record_switch_ns(sw_ns);
+        uint64_t dt = now_ns() - t0;   // one clock pair per resumption
 
-        uint64_t t1 = now_ns();
-
+        record_switch_ns(dt);
         ctx.ctx_switch_count.fetch_add(2, std::memory_order_relaxed);
-        ctx.yield_ns_sum.fetch_add(t1 - t0, std::memory_order_relaxed);
+        ctx.yield_ns_sum.fetch_add(dt, std::memory_order_relaxed);
         ctx.yield_sample_count.fetch_add(1, std::memory_order_relaxed);
 
         if (f->state == Fiber::State::Done) {
