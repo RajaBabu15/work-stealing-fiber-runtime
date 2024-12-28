@@ -40,3 +40,5 @@ perf.data.old
 *.folded
 *.svg
 flamegraph/
+output.txt
+*.trace
