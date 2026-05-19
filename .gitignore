@@ -1,0 +1,40 @@
+# Build directories
+build/
+cmake-build-*/
+
+# CMake artifacts
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+Makefile
+*.cmake
+!CMakeLists.txt
+
+# Compiled binaries
+fiber_runtime
+*.o
+*.a
+*.dylib
+*.so
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.clangd/
+.cache/
+
+# Profiling / perf output
+perf.data
+perf.data.old
+*.folded
+*.svg
+flamegraph/
